@@ -78,7 +78,6 @@ Format de sortie attendu :
           model: "gemma3:4b",
           prompt: prompt,
           stream: false,
-          formats: ["json"],
           options: {
             temperature: 0.1, // <--- C'est ICI que ça se passe
             num_ctx: 4096, // Optionnel : augmente la mémoire contextuelle si le transcript est long
