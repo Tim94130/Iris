@@ -1,5 +1,4 @@
 import { useState, useEffect, useRef } from "react";
-import SpeechToText from "speech-to-text";
 
 const MyComponent = () => {
   const [interimText, setInterimText] = useState("Begin speaking...");
@@ -7,7 +6,7 @@ const MyComponent = () => {
   const [listening, setListening] = useState(false);
 
   const [error, setError] = useState(null);
-  const listenerRef = useRef(null);
+  const recognitionRef = useRef(null);
   const listeningRef = useRef(false);
 
   // État pour les informations extraites par Ollama
@@ -27,20 +26,44 @@ const MyComponent = () => {
 
     const transcription = textArray.join(" ");
 
-    const prompt = `Tu es un assistant qui analyse des transcriptions de réunions. 
-Analyse la transcription suivante et extrais les informations au format JSON strict (titre, budget, date_debut, date_fin, resume).
-Si une information n'est pas mentionnée, suppose la ou mentionne null.
+    const prompt = `Tu es un expert en extraction de données structurées. Ta tâche est d'analyser la transcription d'une réunion de lancement de projet et d'extraire les informations clés au format JSON strict.
 
-Transcription:
-"${transcription}"
+Contexte temporel :
+- Date actuelle (aujourd'hui) : ${new Date().toISOString().split("T")[0]}
+- Utilise cette date pour résoudre les références relatives (ex: "lundi prochain", "dans 3 mois", "asap").
 
-Réponds UNIQUEMENT avec un JSON valide dans ce format exact, sans texte avant ou après:
+Instructions pour les champs :
+1. "titre_projet" : Un nom court et précis. Si non mentionné, déduis-le du contexte.
+2. "budget" : Le montant mentionné avec sa devise (ex: "5000 EUR"). Si aucun montant précis n'est dit, renvoie null. N'INVENTE PAS de budget.
+3. "date_debut" : Format ISO 8601 (YYYY-MM-DD).
+   - Si "asap" ou "dès que possible" est mentionné, utilise la date actuelle.
+   - Si non mentionné, renvoie null.
+4. "date_fin" : Format ISO 8601 (YYYY-MM-DD).
+   - Si une durée est donnée (ex: "projet de 3 mois"), calcule la date de fin à partir de la date de début.
+   - Si non mentionné, renvoie null.
+5. "resume" : Une synthèse professionnelle de 2 phrases maximum décrivant l'objectif du projet.
+
+Règles impératives :
+- NE PAS inventer d'informations factuelles (budget, dates spécifiques) si elles ne sont pas dans le texte. Utilise null.
+- Réponds UNIQUEMENT avec le JSON brut. Pas de markdown, pas de phrase d'intro, pas de conclusion.
+- Assure-toi que le JSON est valide (pas de virgule traînante).
+- Corrige les données si je refouris des informations supplémentaires plus tard.
+
+
+
+
+Transcription à analyser :
+"""
+${transcription}
+"""
+
+Format de sortie attendu :
 {
-  "titre_projet": "string ou null",
-  "budget": "string ou null",
-  "date_debut": "string ou null",
-  "date_fin": "string ou null",
-  "resume": "string ou null"
+  "titre_projet": string | null,
+  "budget": string | null,
+  "date_debut": "YYYY-MM-DD" | null,
+  "date_fin": "YYYY-MM-DD" | null,
+  "resume": string | null
 }`;
 
     try {
@@ -50,7 +73,7 @@ Réponds UNIQUEMENT avec un JSON valide dans ce format exact, sans texte avant o
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          model: "gpt-oss:20b",
+          model: "gemma3:4b",
           prompt: prompt,
           stream: false,
         }),
@@ -82,88 +105,104 @@ Réponds UNIQUEMENT avec un JSON valide dans ce format exact, sans texte avant o
     }
   });
 
-  // const ai = new GoogleGenAI({ apiKey: process.env.REACT_APP_GEMINI_API_KEY });
-
-  // async function askToGemini(question) {
-  //   const response = await ai.models.generateContent({
-  //     model: "gemini-2.5-flash",
-  //     contents: question,
-  //   });
-  //   setGeminiResponse(response.text);
-  // }
-
-  // // Garder la ref synchronisée avec l'état
   useEffect(() => {
     listeningRef.current = listening;
   }, [listening]);
 
   useEffect(() => {
     // Vérifier si le navigateur supporte la reconnaissance vocale
-    if (
-      !("SpeechRecognition" in window) &&
-      !("webkitSpeechRecognition" in window)
-    ) {
+    const SpeechRecognition =
+      window.SpeechRecognition || window.webkitSpeechRecognition;
+
+    if (!SpeechRecognition) {
       setError("Speech recognition not supported in this browser.");
       return;
     }
 
-    const onAnythingSaid = (text) => {
-      setInterimText(text);
+    const recognition = new SpeechRecognition();
+    recognition.continuous = true; // NE JAMAIS S'ARRÊTER
+    recognition.interimResults = true; // Résultats en temps réel
+    recognition.lang = "fr-FR";
+    recognition.maxAlternatives = 1;
+
+    recognition.onresult = (event) => {
+      let interimTranscript = "";
+      let finalTranscript = "";
+
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const transcript = event.results[i][0].transcript;
+        if (event.results[i].isFinal) {
+          finalTranscript += transcript;
+        } else {
+          interimTranscript += transcript;
+        }
+      }
+
+      if (interimTranscript) {
+        setInterimText(interimTranscript);
+      }
+
+      if (finalTranscript) {
+        setFinalisedText((prev) => {
+          const newTexts = [finalTranscript, ...prev];
+          accumulatedTextRef.current = newTexts;
+          analyzeWithOllamaRef.current(newTexts);
+          return newTexts;
+        });
+        setInterimText("");
+      }
     };
 
-    const onEndEvent = () => {
-      // TOUJOURS relancer l'écoute si on est en mode listening
-      if (listeningRef.current && listenerRef.current) {
-        // Petit délai pour éviter les problèmes
+    recognition.onerror = (event) => {
+      console.log("Erreur reconnaissance vocale:", event.error);
+      // Ne pas afficher l'erreur "no-speech" car c'est normal
+      if (event.error !== "no-speech" && event.error !== "aborted") {
+        setError(`Erreur: ${event.error}`);
+      }
+      // Relancer immédiatement si on est toujours en mode écoute
+      if (listeningRef.current) {
         setTimeout(() => {
-          if (listeningRef.current) {
-            try {
-              listenerRef.current?.startListening();
-            } catch (e) {
-              console.log("Relance du micro...");
-            }
+          try {
+            recognition.start();
+          } catch (e) {
+            // Ignorer si déjà démarré
           }
         }, 100);
       }
     };
 
-    const onFinalised = (text) => {
-      setFinalisedText((prev) => {
-        const newTexts = [text, ...prev];
-        // Mettre à jour la ref et déclencher l'analyse
-        accumulatedTextRef.current = newTexts;
-        // Analyser en temps réel avec le nouveau texte
-        analyzeWithOllamaRef.current(newTexts);
-        return newTexts;
-      });
-      setInterimText("");
+    recognition.onend = () => {
+      // TOUJOURS relancer si on est en mode écoute
+      if (listeningRef.current) {
+        setTimeout(() => {
+          try {
+            recognition.start();
+          } catch (e) {
+            // Ignorer si déjà démarré
+          }
+        }, 50); // Délai très court pour éviter de perdre des mots
+      }
     };
 
-    try {
-      const speechListener = new SpeechToText(
-        onFinalised,
-        onEndEvent,
-        onAnythingSaid,
-        "fr-FR"
-      );
-      listenerRef.current = speechListener;
-    } catch (err) {
-      setError(err.message);
-    }
+    recognitionRef.current = recognition;
 
-    // Cleanup function
     return () => {
-      listenerRef.current?.stopListening();
+      recognition.stop();
     };
-  }, []); // Pas de dépendances - le listener est créé une seule fois
+  }, []);
 
   const toggleListening = () => {
     if (listening) {
-      listenerRef.current?.stopListening();
+      recognitionRef.current?.stop();
+      setListening(false);
     } else {
-      listenerRef.current?.startListening();
+      try {
+        recognitionRef.current?.start();
+        setListening(true);
+      } catch (e) {
+        console.log("Erreur démarrage:", e);
+      }
     }
-    setListening(!listening);
   };
 
   return (
@@ -227,9 +266,42 @@ Réponds UNIQUEMENT avec un JSON valide dans ce format exact, sans texte avant o
           )}
         </div>
 
-        {extractedInfo && (
+        {/* Skeleton Loaders pendant l'analyse */}
+        {isAnalyzing && !extractedInfo && (
+          <div className="space-y-4 animate-pulse">
+            <div className="p-4 bg-white rounded-lg shadow border-l-4 border-purple-300">
+              <div className="h-4 bg-purple-200 rounded w-32 mb-3"></div>
+              <div className="h-5 bg-gray-200 rounded w-3/4"></div>
+            </div>
+
+            <div className="p-4 bg-white rounded-lg shadow border-l-4 border-green-300">
+              <div className="h-4 bg-green-200 rounded w-24 mb-3"></div>
+              <div className="h-5 bg-gray-200 rounded w-1/2"></div>
+            </div>
+
+            <div className="p-4 bg-white rounded-lg shadow border-l-4 border-blue-300">
+              <div className="h-4 bg-blue-200 rounded w-28 mb-3"></div>
+              <div className="h-5 bg-gray-200 rounded w-2/3"></div>
+            </div>
+
+            <div className="p-4 bg-white rounded-lg shadow border-l-4 border-orange-300">
+              <div className="h-4 bg-orange-200 rounded w-24 mb-3"></div>
+              <div className="h-5 bg-gray-200 rounded w-2/3"></div>
+            </div>
+
+            <div className="p-4 bg-white rounded-lg shadow border-l-4 border-indigo-300">
+              <div className="h-4 bg-indigo-200 rounded w-20 mb-3"></div>
+              <div className="h-5 bg-gray-200 rounded w-full mb-2"></div>
+              <div className="h-5 bg-gray-200 rounded w-4/5"></div>
+            </div>
+          </div>
+        )}
+
+        {/* Skeleton Loaders pendant la mise à jour (quand on a déjà des données) */}
+        {isAnalyzing && extractedInfo && (
           <div className="space-y-4">
-            <div className="p-4 bg-white rounded-lg shadow border-l-4 border-purple-500">
+            <div className="p-4 bg-white rounded-lg shadow border-l-4 border-purple-500 relative overflow-hidden">
+              <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/60 to-transparent animate-shimmer"></div>
               <h3 className="font-bold text-purple-700 mb-2">
                 📋 Titre du Projet
               </h3>
@@ -238,28 +310,73 @@ Réponds UNIQUEMENT avec un JSON valide dans ce format exact, sans texte avant o
               </p>
             </div>
 
-            <div className="p-4 bg-white rounded-lg shadow border-l-4 border-green-500">
+            <div className="p-4 bg-white rounded-lg shadow border-l-4 border-green-500 relative overflow-hidden">
+              <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/60 to-transparent animate-shimmer"></div>
               <h3 className="font-bold text-green-700 mb-2">💰 Budget</h3>
               <p className="text-gray-700">
                 {extractedInfo.budget || "Non mentionné"}
               </p>
             </div>
 
-            <div className="p-4 bg-white rounded-lg shadow border-l-4 border-blue-500">
+            <div className="p-4 bg-white rounded-lg shadow border-l-4 border-blue-500 relative overflow-hidden">
+              <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/60 to-transparent animate-shimmer"></div>
               <h3 className="font-bold text-blue-700 mb-2">📅 Date de Début</h3>
               <p className="text-gray-700">
                 {extractedInfo.date_debut || "Non mentionnée"}
               </p>
             </div>
 
-            <div className="p-4 bg-white rounded-lg shadow border-l-4 border-orange-500">
+            <div className="p-4 bg-white rounded-lg shadow border-l-4 border-orange-500 relative overflow-hidden">
+              <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/60 to-transparent animate-shimmer"></div>
               <h3 className="font-bold text-orange-700 mb-2">📅 Date de Fin</h3>
               <p className="text-gray-700">
                 {extractedInfo.date_fin || "Non mentionnée"}
               </p>
             </div>
 
-            <div className="p-4 bg-white rounded-lg shadow border-l-4 border-indigo-500">
+            <div className="p-4 bg-white rounded-lg shadow border-l-4 border-indigo-500 relative overflow-hidden">
+              <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/60 to-transparent animate-shimmer"></div>
+              <h3 className="font-bold text-indigo-700 mb-2">📝 Résumé</h3>
+              <p className="text-gray-700">
+                {extractedInfo.resume || "Non disponible"}
+              </p>
+            </div>
+          </div>
+        )}
+
+        {extractedInfo && !isAnalyzing && (
+          <div className="space-y-4">
+            <div className="p-4 bg-white rounded-lg shadow border-l-4 border-purple-500 transition-all duration-300">
+              <h3 className="font-bold text-purple-700 mb-2">
+                📋 Titre du Projet
+              </h3>
+              <p className="text-gray-700">
+                {extractedInfo.titre_projet || "Non mentionné"}
+              </p>
+            </div>
+
+            <div className="p-4 bg-white rounded-lg shadow border-l-4 border-green-500 transition-all duration-300">
+              <h3 className="font-bold text-green-700 mb-2">💰 Budget</h3>
+              <p className="text-gray-700">
+                {extractedInfo.budget || "Non mentionné"}
+              </p>
+            </div>
+
+            <div className="p-4 bg-white rounded-lg shadow border-l-4 border-blue-500 transition-all duration-300">
+              <h3 className="font-bold text-blue-700 mb-2">📅 Date de Début</h3>
+              <p className="text-gray-700">
+                {extractedInfo.date_debut || "Non mentionnée"}
+              </p>
+            </div>
+
+            <div className="p-4 bg-white rounded-lg shadow border-l-4 border-orange-500 transition-all duration-300">
+              <h3 className="font-bold text-orange-700 mb-2">📅 Date de Fin</h3>
+              <p className="text-gray-700">
+                {extractedInfo.date_fin || "Non mentionnée"}
+              </p>
+            </div>
+
+            <div className="p-4 bg-white rounded-lg shadow border-l-4 border-indigo-500 transition-all duration-300">
               <h3 className="font-bold text-indigo-700 mb-2">📝 Résumé</h3>
               <p className="text-gray-700">
                 {extractedInfo.resume || "Non disponible"}
