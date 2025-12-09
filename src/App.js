@@ -1,7 +1,9 @@
 import { useState, useEffect, useRef } from "react";
 
 const MyComponent = () => {
-  const [interimText, setInterimText] = useState("Begin speaking...");
+  const [interimText, setInterimText] = useState(
+    "Début de la prise de parole..."
+  );
   const [finalisedText, setFinalisedText] = useState([]);
   const [listening, setListening] = useState(false);
 
@@ -210,7 +212,7 @@ Format de sortie attendu :
       {/* Left Panel */}
       <div className="w-1/2 bg-white p-8 shadow-lg overflow-y-auto">
         <h1 className="text-3xl font-bold mb-6 text-gray-800">
-          Speech to Text
+          Analyse de Brief Vocal
         </h1>
 
         {error && (
@@ -227,11 +229,13 @@ Format de sortie attendu :
               : "bg-blue-500 hover:bg-blue-600"
           }`}
         >
-          {listening ? "Stop Listening" : "Start Listening"}
+          {listening ? "Arrêter l'écoute" : "Commencer l'écoute"}
         </button>
 
         <div className="mb-6">
-          <h2 className="text-lg font-semibold text-gray-700 mb-2">Current:</h2>
+          <h2 className="text-lg font-semibold text-gray-700 mb-2">
+            Actuellement en cours de transcription:
+          </h2>
           <div className="p-4 bg-gray-50 rounded-lg border border-gray-300 min-h-20">
             <p className="text-gray-600 italic">{interimText}</p>
           </div>
